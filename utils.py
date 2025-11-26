@@ -148,7 +148,7 @@ def is_disordered_mutation(seq: str, idx: int) -> bool:
     """
     disorder_values = meta.predict_disorder(seq)
     idrs = identify_idrs(disorder_values, threshold=DISORDERED_THRESHOLD, min_length=3)
-    is_disordered = is_position_in_idr(idx + 1, idrs)  # TODO check if we should use idx + 1 or idx
+    is_disordered = is_position_in_idr(idx + 1, idrs)
     return is_disordered
 
 
