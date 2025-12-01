@@ -1,13 +1,11 @@
 import json
 import zipfile
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-import torch
 import re
 import metapredict as meta
-import pickle
 
 from sklearn.metrics import auc, roc_curve
 
@@ -16,24 +14,12 @@ from data_classes import AAMut, METHODS_TO_ESM
 from mutation_record import MutationRecord
 
 
-def process_raw_variant(description: str):
+def esm_setup(model_name=ESM1B_MODEL, device=DEVICE) -> tuple:
     """
-        validates variant description compatibility
-    :param description: str format p.[AA][INDEX][AA]
-    :return: re.search obj if successful else raise ValueError
-    """
-    if not description.startswith('p.'):
-        description = 'p.' + description
-    res = re.search(MUTATION_REGEX, description)
-    if not res:
-        raise ValueError("Invalid input valid format of form p.{AA}{location}{AA}")
-    return res.group('orig'), res.group('change'), int(res.group('location'))
-
-
-def esm_setup(model_name=ESM1B_MODEL, device=DEVICE):
-    """
-    :param model_name: str model name
-    :return: model, alphabet api
+    Load the ESM model and alphabet.
+    :param model_name: The name of the ESM1b model to load.
+    :param device: The device to load the model onto.
+    :return: Tuple of (model, alphabet)
     """
     model, alphabet = torch.hub.load("facebookresearch/esm:main", model_name)
     model = model.to(device)
@@ -41,10 +27,12 @@ def esm_setup(model_name=ESM1B_MODEL, device=DEVICE):
     return model, alphabet
 
 
-def process_mutation_name(mutation, offset):
+def process_mutation_name(mutation: str, offset: int) -> AAMut:
     """
-    :param mutation: str in format R29L
-    :return: wt_AA, loc, change_AA
+    Process mutation name into AAMut dataclass.
+    :param mutation: Mutation string (e.g., 'A123C')
+    :param offset: Offset to apply to mutation index
+    :return: AAMut dataclass
     """
     return AAMut(
         wt_aa=mutation[0],
@@ -53,23 +41,13 @@ def process_mutation_name(mutation, offset):
     )
 
 
-def identify_idrs(disorder_values, threshold, min_length=3):
+def identify_idrs(disorder_values: list, threshold: float, min_length: int=3) -> List[Tuple[int, int]]:
     """
-    Identify Intrinsically Disordered Regions (IDRs) manually.
-
-    Parameters:
-    -----------
-    disorder_values : list
-        List of disorder scores
-    threshold : float
-        Threshold for considering a residue as disordered
-    min_length : int
-        Minimum length of an IDR
-
-    Returns:
-    --------
-    list
-        List of (start, end) tuples for IDRs (1-indexed)
+    Get a list of intrinsically disordered regions (IDRs) from disorder scores.
+    :param disorder_values: List of disorder scores for each residue
+    :param threshold: A threshold above which a residue is considered disordered
+    :param min_length: Minimum length of an IDR
+    :return: List of (start, end) tuples for IDRs (1-indexed)
     """
     idrs = []
     in_idr = False
@@ -96,21 +74,12 @@ def identify_idrs(disorder_values, threshold, min_length=3):
     return idrs
 
 
-def is_position_in_idr(position, idrs):
+def is_position_in_idr(position: int, idrs: List[Tuple[int, int]]) -> bool:
     """
     Check if a position is within any IDR.
-
-    Parameters:
-    -----------
-    position : int
-        Position to check (1-indexed)
-    idrs : list
-        List of (start, end) tuples for IDRs (1-indexed)
-
-    Returns:
-    --------
-    bool
-        True if position is in an IDR, False otherwise
+    :param position: Position to check (1-indexed)
+    :param idrs: List of (start, end) tuples for IDRs (1-indexed)
+    :return: True if position is in any IDR, False otherwise
     """
     for start, end in idrs:
         if start <= position <= end:
@@ -118,33 +87,13 @@ def is_position_in_idr(position, idrs):
     return False
 
 
-def is_ppi_mutation(protein_seq: str, idx: int, ppi_predictions) -> Optional[bool]:
-    if protein_seq in ppi_predictions:
-        predictions_list = ppi_predictions[protein_seq]
-
-        if 0 <= idx < len(predictions_list):
-            prediction_value = predictions_list[idx]
-
-            # Convert prediction to boolean
-            # Values 1-3 are considered PPI, 0 is not PPI
-            if prediction_value in [1, 2, 3]:
-                return True
-            elif prediction_value == 0:
-                return False
-
-    return None  # Return None if index is out of bounds or prediction is invalid
-
-
 def is_disordered_mutation(seq: str, idx: int) -> bool:
-    """ Check if a residue at a given index in a sequence is disordered.
+    """
+    Check if a residue at a given index in a sequence is disordered.
     This function uses the MetaPredict library to predict disorder scores for the sequence
-
-    Args:
-        seq (str): The protein sequence to analyze.
-        idx (int): The index of the residue to check.
-
-    Returns:
-        bool: True if the residue at the given index is disordered, False otherwise.
+    :param seq: The protein sequence
+    :param idx: The index of the residue to check
+    :return: True if the residue is in a disordered region, False otherwise
     """
     disorder_values = meta.predict_disorder(seq)
     idrs = identify_idrs(disorder_values, threshold=DISORDERED_THRESHOLD, min_length=3)
@@ -152,16 +101,33 @@ def is_disordered_mutation(seq: str, idx: int) -> bool:
     return is_disordered
 
 
-def find_mask_positions(protein_seq, mask_token):
+def add_is_disordered_mutation_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Find all mask token positions in the protein sequence.
+    Add a column indicating whether each mutation is in a disordered region.
+    :param df: DataFrame with columns 'protein_sequence', 'mutant'.
+    :return: DataFrame with added 'is_disordered_mutation' column
+    """
+    if 'is_disordered_mutation' in df.columns:
+        return df
 
-    Args:
-        protein_seq: The protein sequence string
-        mask_token: The mask token to search for
+    df = df.copy()
+    disordered_lst = []
+    for _, row in df.iterrows():
+        protein_seq = row['protein_sequence']
+        mutation = row['mutant']
+        aa_mut = process_mutation_name(mutation, offset=OFFSET)
+        is_disordered = is_disordered_mutation(protein_seq, aa_mut.mut_idx)
+        disordered_lst.append(is_disordered)
+    df['is_disordered_mutation'] = disordered_lst
+    return df
 
-    Returns:
-        List of tuples (start, end) for each mask token position
+
+def find_mask_positions(protein_seq: str, mask_token: str) -> List[Tuple[int, int]]:
+    """
+    Find all positions of mask tokens in the protein sequence.
+    :param protein_seq: The protein sequence
+    :param mask_token: The mask token string (e.g., "<mask>")
+    :return: List of (start, end) tuples for mask positions
     """
     mask_positions = []
     start_pos = 0
@@ -365,18 +331,6 @@ def get_trunctad_logits(aa_only, batch_tokens, model):
     return torch.stack(logit_parts).to(DEVICE)
 
 
-def get_mutant_dest_and_seq(method_mutant, sequence, aa_mut: AAMut):
-    if method_mutant == METHODS_TO_ESM.MUTANTE:
-        mutant_seq = sequence[:aa_mut.mut_idx] + aa_mut.change_aa + sequence[aa_mut.mut_idx + 1:]
-    elif method_mutant == METHODS_TO_ESM.MASKED:
-        mutant_seq = sequence[:aa_mut.mut_idx] + "<mask>" + sequence[aa_mut.mut_idx + 1:]
-    elif method_mutant == METHODS_TO_ESM.WT:
-        mutant_seq = sequence
-    else:
-        raise ValueError(f"Unknown method_mutant: {method_mutant}")
-    return mutant_seq
-
-
 def run_esm(model, alphabet, protein_seq: str, aa_mut: AAMut):
     model.eval()
     with torch.no_grad():
@@ -390,16 +344,7 @@ def run_esm(model, alphabet, protein_seq: str, aa_mut: AAMut):
             truncated_logits=truncated_logits,
         )
 
-    return wt_record.llr_base_score.item(), wt_record.entropy_tensor.item()
-
-
-def get_mutation_node_key(is_long, is_disordered_seq, is_sulfur, is_ppi):
-    return (
-        f"long_{is_long}__"
-        f"disordered_{is_disordered_seq}__"
-        f"sulfur_{is_sulfur}__"
-        f"ppi_{is_ppi}"
-    )
+    return wt_record.mutant_log_marginal_probability.item(), wt_record.marginal_entropy.item()
 
 
 def _create_simple_bins(scores, n_bins):
@@ -417,7 +362,6 @@ def _create_simple_bins(scores, n_bins):
 
     bin_edges.append(sorted_scores[-1] + 1e-10)
     return np.array(bin_edges), len(bin_edges) - 1
-
 
 
 def create_unified_calibration(
@@ -649,7 +593,14 @@ def calculate_auc_and_thresholds(test_data, label_col, score_col, calibrated_col
     print(raw_cm)
 
 
-def add_raw_esm1b_score(df, score_col, entropy_score_col):
+def add_raw_esm1b_score(df: pd.DataFrame, score_col: str, entropy_score_col: str) -> pd.DataFrame:
+    """
+    Adding raw ESM1b scores and entropy scores to the DataFrame.
+    :param df: Input DataFrame with columns 'protein_sequence' and 'mutant'
+    :param score_col: Name of the column to store ESM1b scores
+    :param entropy_score_col: Name of the column to store ESM1b entropy scores
+    :return: DataFrame with added score columns
+    """
     df = df.copy()
     if score_col in df.columns and entropy_score_col in df.columns:
         return df
@@ -669,21 +620,15 @@ def add_raw_esm1b_score(df, score_col, entropy_score_col):
     df[entropy_score_col] = esm1b_entropies
     return df
 
-def add_is_ppi_mutation_column(df: pd.DataFrame, zip_path, json_filename_inside_zip) -> pd.DataFrame:
+
+def add_is_ppi_mutation_column(df: pd.DataFrame, zip_path: str, json_filename_inside_zip: str) -> pd.DataFrame:
     """
-    Add a column indicating whether each mutation is in a PPI (Protein-Protein Interaction) region.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame containing mutation data with 'protein_sequence' and 'mutant_aa_index' columns
-    json_path : str
-        Path to the JSON file containing PPI predictions
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with added 'is_ppi_mutation' column (bool or NaN)
+    Add a column indicating whether each mutation affects a protein-protein interaction (PPI).
+    Works with multiple protein sequences in the same DataFrame.
+    :param df: Input DataFrame with columns 'protein_sequence', 'mutant', etc.
+    :param zip_path: Path to the zip file containing PPI predictions in JSON format
+    :param json_filename_inside_zip: Filename of the JSON file inside the zip
+    :return: DataFrame with added 'is_ppi_mutation' column
     """
     if 'is_ppi_mutation' in df.columns:
         return df
@@ -703,7 +648,6 @@ def add_is_ppi_mutation_column(df: pd.DataFrame, zip_path, json_filename_inside_
 
     for idx, row in df_with_ppi.iterrows():
         sequence = row['protein_sequence']
-        # mutant_index = row['mutant_aa_index']
         mutant = row['mutant']
         aa_mut = process_mutation_name(mutant, OFFSET)
         mutant_index = aa_mut.mut_idx
@@ -712,10 +656,6 @@ def add_is_ppi_mutation_column(df: pd.DataFrame, zip_path, json_filename_inside_
         if sequence in ppi_predictions:
             sequences_found += 1
             predictions_list = ppi_predictions[sequence]
-
-            # Check if mutant_index is valid (within bounds)
-            # Using idx-1 as specified, so mutant_index should be 1-based
-            # list_index = mutant_index - 1
 
             if 0 <= mutant_index < len(predictions_list):
                 prediction_value = predictions_list[mutant_index]
@@ -749,7 +689,13 @@ def add_is_ppi_mutation_column(df: pd.DataFrame, zip_path, json_filename_inside_
 
     return df_with_ppi
 
-def clean_duplication_in_dataset(df):
+
+def clean_duplication_in_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove entries with conflicting binary labels for the same (protein_sequence, mutant) key.
+    :param df:  Input DataFrame with columns 'protein_sequence', 'mutant', 'binary_label'
+    :return: Cleaned DataFrame with duplicates removed
+    """
     key = ['protein_sequence', 'mutant']
 
     # Step 1: find keys where there are conflicting binary labels
@@ -761,7 +707,7 @@ def clean_duplication_in_dataset(df):
         .query('binary_label > 1')  # more than 1 unique label
     )
 
-    # Step 2: remove those keys from tmp_df
+    # Step 2: remove those keys from df
     clean_df = (
         df
         .merge(diff_label_keys[key], on=key, how='left', indicator=True)
@@ -769,6 +715,7 @@ def clean_duplication_in_dataset(df):
         .drop(columns=['_merge'])
     )
 
+    # Step 3: remove exact duplicates, keeping first occurrence
     clean_df = clean_df.drop_duplicates(subset=['protein_sequence', 'mutant'])
 
     return clean_df

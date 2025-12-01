@@ -1,3 +1,5 @@
+from typing import Dict, Tuple, List
+
 import numpy as np
 import pandas as pd
 from sklearn.mixture import GaussianMixture
@@ -5,7 +7,13 @@ from sklearn.mixture import GaussianMixture
 from tree_node import CalibrationTree, key_to_name
 
 
-def extreme_outliers_mad(data, threshold=4.25):
+def extreme_outliers_mad(data: np.ndarray, threshold: float=4.25) -> np.ndarray:
+    """
+    Identify extreme outliers using the Median Absolute Deviation (MAD) method.
+    :param data: Input data array
+    :param threshold: Threshold for modified Z-score to consider as outlier
+    :return: Indices of extreme outliers
+    """
     data = np.array(data)
     median = np.median(data)
     mad = np.median(np.abs(data - median))
@@ -15,8 +23,13 @@ def extreme_outliers_mad(data, threshold=4.25):
     return np.where(np.abs(modified_z) > threshold)[0]  # returns indices of extreme outliers
 
 
-
-def remove_outliers(per_node_train_dfs: pd.DataFrame, score_col, tree_spec):
+def remove_outliers(per_node_train_dfs: Dict[str, pd.DataFrame], score_col: str):
+    """
+    Remove extreme outliers from per-node training dataframes.
+    :param per_node_train_dfs: A dictionary mapping node keys to their training DataFrames
+    :param score_col: The name of the score column to check for outliers
+    :return: A new dictionary of DataFrames with outliers removed
+    """
     dfs = []
     for node_key, df in per_node_train_dfs.items():
         dfs.append(df)
@@ -41,9 +54,14 @@ def remove_outliers(per_node_train_dfs: pd.DataFrame, score_col, tree_spec):
     return new_per_node_train_dfs
 
 
-
-def generate_gmm_key_from_tree_spec(calibration_tree: CalibrationTree, leaf_key) -> str:
-    """Generate GMM key from TreeSpec and leaf_key."""
+def generate_gmm_key_from_calibration_tree(calibration_tree: CalibrationTree, leaf_key: str) -> str:
+    """
+    Generate GMM key from CalibrationTree and leaf_key.
+    :param calibration_tree: The calibration tree
+    :param leaf_key: The current leaf key string
+    :return: A string representing the GMM key. This string encodes the combination of features
+             in a binary format, where each feature is represented by '0', '1', or '2' based on its value.
+    """
     key_parts = [calibration_tree.key_prefix]  # Use configurable prefix
 
     # Generate binary encoding in FIXED ORDER to match pre-trained GMMs
@@ -85,22 +103,14 @@ def generate_gmm_key_from_tree_spec(calibration_tree: CalibrationTree, leaf_key)
     return '_'.join(key_parts)
 
 
-def train_gmm(df: pd.DataFrame, score_col: str, label_col: str, n_components: int):
+def train_gmm(df: pd.DataFrame, score_col: str, label_col: str, n_components: int) -> tuple:
     """
-    Train GMM models for benign and pathogenic classes.
-
-    Note: This function no longer returns pathogenic_ratio, n_path, n_ben since training data
-    is now balanced. Use node_pathogenic_ratios from build_train_test_per_nodes instead.
-
-    Args:
-        df: DataFrame with score and label columns
-        score_col: Name of score column
-        label_col: Name of label column
-        n_components: Number of GMM components
-
-    Returns:
-        benign_gmm: Trained GMM for benign class
-        pathogenic_gmm: Trained GMM for pathogenic class
+    Train GMM models for benign and pathogenic subsets using GaussianMixture from sklearn.
+    :param df: Input DataFrame
+    :param score_col: The name of the score column
+    :param label_col: The name of the label column
+    :param n_components: The number of mixture components for the GMM
+    :return: A tuple containing the trained benign and pathogenic GMM models
     """
     scores = df[score_col].to_numpy()
     labels = df[label_col].to_numpy().astype(int)
@@ -115,14 +125,15 @@ def train_gmm(df: pd.DataFrame, score_col: str, label_col: str, n_components: in
     return benign_gmm, pathogenic_gmm
 
 
-
-def get_gmm_for_score_col(per_node_train_dfs, score_col, calibration_tree: CalibrationTree, label_col, n_components):
+def get_gmm_for_score_col(per_node_train_dfs: Dict[str, pd.DataFrame], score_col: str, calibration_tree: CalibrationTree, label_col: str, n_components: int) -> Dict[str, Tuple[GaussianMixture, GaussianMixture]]:
     """
-    Train GMM models for each leaf combination defined by the dynamically built TreeSpec.
-
-    NOTE: tree_spec.build_tree() must be called BEFORE this function.
-    NOTE: This function no longer returns pathogenic_ratio, n_path, n_ben.
-          GMMs are stored as (benign_gmm, pathogenic_gmm) only.
+    Train GMM models for each leaf combination in the calibration tree for a specific score column.
+    :param per_node_train_dfs: A dictionary mapping node keys to their training DataFrames
+    :param score_col: The name of the score column
+    :param calibration_tree: The calibration tree
+    :param label_col: The name of the label column
+    :param n_components: The number of mixture components for the GMM
+    :return: A dictionary mapping GMM keys to tuples of (benign_gmm, pathogenic_gmm)
     """
 
     if calibration_tree.root is None:
@@ -130,11 +141,10 @@ def get_gmm_for_score_col(per_node_train_dfs, score_col, calibration_tree: Calib
 
     all_gmms = {}
 
-    updated_per_node_train_dfs = remove_outliers(per_node_train_dfs, score_col, calibration_tree)
+    updated_per_node_train_dfs = remove_outliers(per_node_train_dfs, score_col)
 
     # Train GMM for each leaf combination
     for leaf_key, subset in updated_per_node_train_dfs.items():
-        # subset = filtered_data[leaf_mask].copy()
 
         if subset.empty:
             continue
@@ -142,7 +152,7 @@ def get_gmm_for_score_col(per_node_train_dfs, score_col, calibration_tree: Calib
         df_for_gmm = subset[[score_col, label_col]]
 
         # Generate key for this leaf combination
-        gmm_key = generate_gmm_key_from_tree_spec(calibration_tree, leaf_key)
+        gmm_key = generate_gmm_key_from_calibration_tree(calibration_tree, leaf_key)
 
         n_path = len(subset[subset[label_col] == 1])
         n_ben = len(subset[subset[label_col] == 0])
@@ -164,33 +174,25 @@ def get_gmm_for_score_col(per_node_train_dfs, score_col, calibration_tree: Calib
         else:
             benign_gmm, pathogenic_gmm = None, None
 
-        # Store only the GMM models (no ratio, n_path, n_ben)
         all_gmms[gmm_key] = (benign_gmm, pathogenic_gmm)
 
     return all_gmms
 
 
-
-def train_gmms_for_tree_spec(per_node_train_dfs, tree_spec, score_cols, label_col='binary_label', n_components=2):
+def train_gmms_for_tree_spec(per_node_train_dfs: Dict[str, pd.DataFrame], calibration_tree: CalibrationTree, score_cols: List[str], label_col: str, n_components: int):
     """
-    Train GMMs for a dynamically built TreeSpec.
-
-    Args:
-        df: DataFrame with mutation data
-        tree_spec: TreeSpec object (must have build_tree() called already)
-        score_cols: List of score columns to train GMMs for
-        label_col: Label column name
-        n_components: Number of GMM components
-
-    Returns:
-        Dict of GMM models organized by score column
+    Train GMM models for all score columns and leaf combinations in the calibration tree.
+    :param per_node_train_dfs: A dictionary mapping node keys to their training DataFrames
+    :param calibration_tree: The calibration tree
+    :param score_cols: A list of score column names
+    :param label_col: The name of the label column
+    :param n_components: The number of mixture components for the GMM
+    :return: A dictionary mapping score column names to dictionaries of GMM models
+             (which map GMM keys to tuples of (benign_gmm, pathogenic_gmm))
     """
-
-    if tree_spec.root is None:
+    if calibration_tree.root is None:
         raise ValueError("TreeSpec has not been built yet. Call tree_spec.build_tree() first.")
 
-    # Preprocess data
-    # df = preprocess_df(df, tree_spec)
     # Train GMMs for each score column
     all_gmm_models = {}
     for score_col in score_cols:
@@ -198,7 +200,7 @@ def train_gmms_for_tree_spec(per_node_train_dfs, tree_spec, score_cols, label_co
         all_gmms = get_gmm_for_score_col(
             per_node_train_dfs=per_node_train_dfs,
             score_col=score_col,
-            calibration_tree=tree_spec,
+            calibration_tree=calibration_tree,
             label_col=label_col,
             n_components=n_components
         )
@@ -206,8 +208,15 @@ def train_gmms_for_tree_spec(per_node_train_dfs, tree_spec, score_cols, label_co
     return all_gmm_models
 
 
-def sample_from_gmm(gmm_model, n_samples, pathogenic_ratio):
-    """Sample synthetic data from GMM model."""
+def sample_from_gmm(gmm_model: tuple, n_samples: int, pathogenic_ratio: float) -> Dict[str, np.ndarray]:
+    """
+    Sample from the GMM model to generate synthetic scores and labels.
+    The sampling is happening according to the specified pathogenic ratio.
+    :param gmm_model: A tuple containing (benign_gmm, pathogenic_gmm)
+    :param n_samples: Number of samples to generate
+    :param pathogenic_ratio: The pathogenic ratio for each tree node
+    :return: A dictionary with 'scores' and 'labels' as keys
+    """
     if n_samples < 1:
         return {
             'scores': np.array([]),

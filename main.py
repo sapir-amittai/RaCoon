@@ -5,42 +5,38 @@ import argparse
 
 from consts import ESM_MAX_LENGTH, SCORE_COL, PPI_PREDICTIONS_PATH, WT_ENTROPY_COL_NAME, \
     PATHOGENIC, BENIGN, N_SAMPLES_TO_GENERATE, N_BINS, \
-    GMM_CREATION_SAMPLE_SIZE, RANDOM_STATE, RATIO_SAMPLE_SIZE, PPI_PREDICTIONS_FILE_NAME
+    GMM_CREATION_SAMPLE_SIZE, RANDOM_STATE, RATIO_SAMPLE_SIZE, PPI_PREDICTIONS_FILE_NAME, RACOON_NODE_COL_NAME, \
+    N_GMM_COMPONENTS, RACOON_CALIBRATION_COL_NAME
 import utils
 import pandas as pd
 
-from gmm_utils import train_gmms_for_tree_spec, generate_gmm_key_from_tree_spec, sample_from_gmm
+from gmm_utils import train_gmms_for_tree_spec, generate_gmm_key_from_calibration_tree, sample_from_gmm
 from tree_node import CalibrationTree, dim_sulfur, dim_ppi, dim_length, dim_fold, print_tree, \
     build_node_calibration_masks, key_to_name, build_leaf_masks
 
 
 def build_train_test_per_nodes(
-        df,
-        calibration_tree,
-        train_sample_size,
-        random_state,
-        ratio_sample_size):
+        df: pd.DataFrame,
+        calibration_tree: CalibrationTree,
+        train_sample_size: int,
+        random_state: int,
+        ratio_sample_size: int) -> tuple:
     """
     Split data per node into train/test sets and calculate pathogenic ratios.
-
     Process:
-    1. For each node, sample up to ratio_sample_size mutations to calculate pathogenic ratio
-    2. Use these ratio samples for training (up to train_sample_size per class)
-    3. If we need more training samples, take additional ones from remaining data
-    4. Discard any unused ratio samples (they won't be in train OR test)
-    5. Everything else goes to test
+    1. For each node, sample up to ratio_sample_size mutations to calculate pathogenic ratio and
+        use these ratio samples for training (up to train_sample_size per class)
+    2. If we need more training samples, take additional ones from remaining data
+    3. Discard any unused ratio samples (they won't be in train OR test). Everything else goes to test
 
-    Args:
-        df: DataFrame with mutation data
-        calibration_tree: TreeSpec object defining the tree structure
-        train_sample_size: Number of samples per class for training (e.g., 100 means 100 path + 100 benign)
-        random_state: Random state for reproducibility
-        ratio_sample_size: Number of samples to use for calculating pathogenic ratio (default: 500)
-
-    Returns:
-        train_df: Training DataFrame
-        test_df: Test DataFrame
-        node_pathogenic_ratios: Dict mapping leaf_key to pathogenic ratio
+    :param df: DataFrame with mutation data
+    :param calibration_tree: CalibrationTree object defining the calibration tree structure
+    :param train_sample_size: Number of samples per class for training (e.g., 100 means 100 pathogenic + 100 benign)
+    :param random_state: Random state for reproducibility
+    :param ratio_sample_size: Number of samples to use for calculating pathogenic ratio (default: 500)
+    :return: per_node_train_dfs: Training DataFrame
+             test_df: Test DataFrame
+             node_pathogenic_ratios: Dict mapping leaf_key to pathogenic ratio
     """
     # Build leaf masks FIRST (before splitting)
     leaf_masks = build_node_calibration_masks(df, calibration_tree)
@@ -50,7 +46,7 @@ def build_train_test_per_nodes(
     used_train_data = []
     node_pathogenic_ratios = {}
 
-    # Split PER NODE
+    # Split per node
     for leaf_key, leaf_mask in leaf_masks.items():
         node_data = df[leaf_mask].copy()
 
@@ -63,7 +59,7 @@ def build_train_test_per_nodes(
         benign_all = node_data[node_data['binary_label'] == BENIGN]
 
         # =================================================================
-        # STEP 1: Sample for ratio calculation
+        # STEP 1: Sample ratio samples for pathogenic ratio calculation
         # =================================================================
         # Sample up to ratio_sample_size from the full node data
         ratio_sample_size_actual = min(ratio_sample_size, len(node_data))
@@ -79,7 +75,7 @@ def build_train_test_per_nodes(
         ratio_benign = ratio_sample[ratio_sample['binary_label'] == BENIGN]
 
         # =================================================================
-        # STEP 2: Create training set from ratio samples + additional if needed
+        # STEP 2: Create training set. If needed, get additional samples from remaining data
         # =================================================================
 
         # Start with ratio samples for training
@@ -120,9 +116,9 @@ def build_train_test_per_nodes(
         used_train_data.append(node_sed_train_data)
         per_node_train_dfs[leaf_key] = pd.concat([train_path, train_ben])
 
-        # =================================================================
-        # STEP 3: Create test set (everything except train and unused ratio samples)
-        # =================================================================
+    # =================================================================
+    # STEP 3: Create test set from remaining data
+    # =================================================================
 
     node_sed_train_data_df = pd.concat(used_train_data).drop_duplicates(subset=['protein_sequence', 'mutant'])
     test_df = df.merge(
@@ -140,7 +136,7 @@ def get_calibrations(per_node_train_dfs, calibration_tree, score_col, gmm_models
     for leaf_key in per_node_train_dfs.keys():
         leaf_name = key_to_name(calibration_tree, leaf_key)
 
-        gmm_key = generate_gmm_key_from_tree_spec(calibration_tree, leaf_key)
+        gmm_key = generate_gmm_key_from_calibration_tree(calibration_tree, leaf_key)
         gmm_data = gmm_models_by_score[score_col][gmm_key]
         benign_gmm, pathogenic_gmm = gmm_data
 
@@ -192,19 +188,20 @@ def apply_calibration_to_df(test_data, calibrated_col_name, tree_spec, calibrati
 
         # Store calibrated scores in the appropriate column
         test_data.loc[leaf_mask, calibrated_col_name] = calibrated_scores
+        test_data.loc[leaf_mask, RACOON_NODE_COL_NAME] = str(leaf_key)
 
         print(f"Applied calibration for {leaf_name} ({score_col}): {leaf_mask.sum()} mutations")
     return test_data
 
 
 def racoon(
-        df,
-        tree_spec,
-        gmm_creation_sample_size,
-        random_state,
-        ratio_sample_size,
-        score_col,
-        label_col
+        df: pd.DataFrame,
+        tree_spec: CalibrationTree,
+        gmm_creation_sample_size: int,
+        random_state: int,
+        ratio_sample_size: int,
+        score_col: str,
+        label_col: str,
 ):
     per_node_train_dfs, test_df, node_pathogenic_ratios = build_train_test_per_nodes(
         df=df,
@@ -216,9 +213,10 @@ def racoon(
 
     gmm_models_by_score = train_gmms_for_tree_spec(
         per_node_train_dfs=per_node_train_dfs,
-        tree_spec=tree_spec,
+        calibration_tree=tree_spec,
         score_cols=[score_col],
         label_col=label_col,
+        n_components=N_GMM_COMPONENTS,
     )
 
     calibrations = get_calibrations(
@@ -231,7 +229,7 @@ def racoon(
 
     test_df_calibrated = apply_calibration_to_df(
         test_data=test_df,
-        calibrated_col_name='our_calibrated_score',
+        calibrated_col_name=RACOON_CALIBRATION_COL_NAME,
         tree_spec=tree_spec,
         calibrations=calibrations,
     )
@@ -240,7 +238,7 @@ def racoon(
         test_data=test_df_calibrated,
         score_col=SCORE_COL,
         label_col=label_col,
-        calibrated_col_name='our_calibrated_score'
+        calibrated_col_name=RACOON_CALIBRATION_COL_NAME
     )
     return test_df_calibrated
 
@@ -253,8 +251,7 @@ def create_parser():
     parser.add_argument(
         "--df_path",
         type=str,
-        default=None,
-        required=False
+        required=True
     )
 
     parser.add_argument(
@@ -267,7 +264,7 @@ def create_parser():
     return parser
 
 
-def get_calibration_tree(df):
+def get_calibration_tree(df: pd.DataFrame) -> CalibrationTree:
     calibration_tree = CalibrationTree(
         available_dims=[dim_fold(), dim_sulfur(), dim_ppi()],
         length_dim=dim_length(threshold=ESM_MAX_LENGTH),
@@ -282,7 +279,10 @@ def get_calibration_tree(df):
     return calibration_tree
 
 
-def main():
+def run_racoon() -> None:
+    """
+    Main function to run the RACOON calibration pipeline.
+    """
     parser = create_parser()
     args = parser.parse_args()
 
@@ -304,6 +304,8 @@ def main():
     df = utils.add_is_ppi_mutation_column(
         df=df, zip_path=PPI_PREDICTIONS_PATH, json_filename_inside_zip=PPI_PREDICTIONS_FILE_NAME
     )
+    df = utils.add_is_disordered_mutation_column(df=df)
+    df["sequence_length"] = df["protein_sequence"].str.len()
     calibration_tree = get_calibration_tree(df)
     df = racoon(
         df=df,
@@ -322,4 +324,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_racoon()

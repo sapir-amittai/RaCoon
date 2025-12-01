@@ -1,59 +1,23 @@
 import os
 import pickle
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Tuple, Optional, Iterable
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import jensenshannon
 
 from consts import MIN_VARIANTS_PER_LEAF, MIN_PATHOGENIC_PER_LEAF, MIN_BENIGN_PER_LEAF, BENIGN, PATHOGENIC
+from data_classes import Dimension
 
-BoolFunc = Callable[[pd.DataFrame], pd.Series]
+
 Key = Tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class Dimension:
-    """Represents a binary partitioning attribute."""
-    name: str
-    col_name: str
-    values: Dict[str, BoolFunc]
-    order: List[str]
-    label_map: Dict[str, str]
-    colors: Optional[Dict[str, str]] = None
-
-    def get_threshold(self) -> Optional[int]:
-        """Extract threshold value from dimension if it exists."""
-        if self.name == 'length':
-            for val, label in self.label_map.items():
-                if 'than_' in label:
-                    return int(label.split('than_')[1])
-        elif self.name == 'homologs':
-            for val, label in self.label_map.items():
-                if '_to_' in label:
-                    return int(label.split('_to_')[1])
-                elif '_plus' in label:
-                    return int(label.split('_')[1])
-        return None
-
-    def get_helper_column_name(self) -> Optional[str]:
-        """Get the helper column name for this dimension."""
-        if self.name == 'length':
-            return 'is_long'
-        elif self.name == 'homologs':
-            return 'high_homologs'
-        elif self.name == 'fold':
-            return 'is_disordered'
-        elif self.name == 'ppi':
-            return 'is_ppi'
-        elif self.name == 'sulfur':
-            return 'is_sulfur'
-        return None
 
 
 @dataclass
 class TreeNode:
-    """Represents a node in the calibration tree."""
+    """
+    A node in the calibration tree.
+    """
     node_id: int
     parent: Optional['TreeNode'] = None
     children: Dict[str, 'TreeNode'] = field(default_factory=dict)
@@ -61,16 +25,24 @@ class TreeNode:
     split_jsd: Optional[float] = None
     available_dimensions: List[Dimension] = field(default_factory=list)
     data_mask: Optional[pd.Series] = None
-    leaf_key: Optional[Tuple[str, ...]] = None
+    leaf_key: Optional[Key] = None
     is_leaf: bool = True
     depth: int = 0
-
     has_calibration: bool = False
-    calibration_key: Optional[Tuple[str, ...]] = None
+    calibration_key: Optional[Key] = None
 
     def meets_minimum_requirements(self, df: pd.DataFrame, label_col: str,
-                                   min_variants_per_leaf, min_pathogenic_per_leaf, min_benign_per_leaf) -> bool:
-        """Check if node meets minimum data requirements."""
+                                   min_variants_per_leaf: int, min_pathogenic_per_leaf: int, min_benign_per_leaf: int
+                                   ) -> bool:
+        """
+        Check if this node meets minimum data requirements.
+        :param df: The full DataFrame
+        :param label_col: The name of the label column
+        :param min_variants_per_leaf: A minimum total variants required
+        :param min_pathogenic_per_leaf: A minimum pathogenic variants required
+        :param min_benign_per_leaf: A minimum benign variants required
+        :return: True if requirements are met, False otherwise
+        """
         if self.data_mask is None:
             return False
 
@@ -84,16 +56,18 @@ class TreeNode:
                 n_benign >= min_benign_per_leaf)
 
 
-@dataclass
 class CalibrationTree:
-    """Dynamic tree specification that builds itself based on data."""
+    """
+    The calibration tree structure.
+    A dynamic tree that partitions data based on jensen-shannon divergence of class-conditional distributions.
+    This tree is the calibration specification used to build calibration models.
+    """
     available_dims: List[Dimension]
     length_dim: Optional[Dimension]
     path_prefix: str = "all"
     key_prefix: str = "ld"
     uniref_version: str = "uniref90"
     title_info: str = ""
-    leaf_colors: Optional[Dict[Tuple[str, ...], str]] = None
     min_variants_per_leaf: int = MIN_VARIANTS_PER_LEAF
     min_pathogenic_per_leaf: int = MIN_PATHOGENIC_PER_LEAF
     min_benign_per_leaf: int = MIN_BENIGN_PER_LEAF
@@ -103,26 +77,15 @@ class CalibrationTree:
     leaf_nodes: List[TreeNode] = field(default_factory=list)
     calibration_nodes: List[TreeNode] = field(default_factory=list)
     dims: List[Dimension] = field(default_factory=list)
-    # cache_final_calibration_cache_path: str = None
 
-    _final_calibration_cache: Optional[Dict[int, Tuple[str, ...]]] = None
+    _final_calibration_cache: Optional[Dict[int, Key]] = None
 
-    def build_tree(self, df: pd.DataFrame, score_col: str, label_col: str):
-        """
-        Build the calibration tree dynamically based on data.
+    def __init__(self, available_dims: List[Dimension], title_info, length_dim: Optional[Dimension] = None):
+        self.available_dims = available_dims
+        self.length_dim = length_dim
+        self.title_info = title_info
 
-        Algorithm 1: Dataset partitioning
-        1. Split by length (root)
-        2. For each node, find best attribute by JSD
-        3. Split and recurse
-        """
-        print("=" * 60)
-        print("Building Dynamic Calibration Tree")
-        print("=" * 60)
-
-        # Ensure required columns exist
-        df = self._ensure_columns(df)
-
+    def build_tree(self, df: pd.DataFrame, score_col: str, label_col: str) -> 'CalibrationTree':
         # Initialize root with length split
         self.root = TreeNode(
             node_id=0,
@@ -141,23 +104,12 @@ class CalibrationTree:
         else:
             print("\nNo length split - starting with available dimensions")
 
-        # # Split root by length
-        # print(f"\nRoot split: {self.length_dim.name}")
-        # self._split_node(self.root, self.length_dim, df)
-        #
-        # # Track dimensions used
-        # used_dims = [self.length_dim]
-
         # Recursively build tree
         node_counter = [1]  # Use list to allow modification in nested function
         self._build_recursive(self.root, df, score_col, label_col, used_dims, node_counter)
 
         # Prune tree (Algorithm 2)
-        print("\n" + "=" * 60)
-        print("Pruning Tree")
-        print("=" * 60)
         self._prune_tree(df, label_col)
-
         self._update_leaf_and_calibration_status(df, label_col)
 
         # Collect final leaf nodes and build dims list
@@ -165,9 +117,7 @@ class CalibrationTree:
 
         self._compute_final_calibration_assignments(df)
 
-        print("\n" + "=" * 60)
         print("Tree Construction Complete")
-        print("=" * 60)
         print(f"Total leaves: {len(self.leaf_nodes)}")
         print(f"Dimensions used: {[d.name for d in self.dims]}")
         print(f"Tree depth: {max(leaf.depth for leaf in self.leaf_nodes)}")
@@ -210,15 +160,18 @@ class CalibrationTree:
             _update_node_recursive(self.root)
 
     def _build_recursive(self, node: TreeNode, df: pd.DataFrame, score_col: str,
-                         label_col: str, used_dims: List[Dimension], node_counter: List[int]):
-        """Recursively build tree by finding best splits."""
-
-        # Mark this node as having calibration if it meets requirements
-        # if node.meets_minimum_requirements(df, label_col, self.min_variants_per_leaf,
-        #                                    self.min_pathogenic_per_leaf, self.min_benign_per_leaf):
-        #     node.has_calibration = True
-        #     node.calibration_key = self._build_leaf_key(node)
-
+                         label_col: str, used_dims: List[Dimension], node_counter: List[int]) -> None:
+        """
+        Recursive function to build the tree. The tree is built by splitting nodes based on the highest JSD of the
+        remaining available dimensions.
+        :param node: Current TreeNode to process. Should be the root initially.
+        :param df: The full DataFrame
+        :param score_col: The name of the score column
+        :param label_col: The name of the label column
+        :param used_dims: List of dimensions that have been used so far
+        :param node_counter: A list with a single integer to track node IDs
+        :return: None. It updates the tree in place.
+        """
         # Process children if they exist
         if not node.is_leaf:
             for child_name, child_node in node.children.items():
@@ -228,11 +181,6 @@ class CalibrationTree:
         # Check if we can still split
         if not node.available_dimensions:
             return
-
-        # Check if node meets minimum requirements for SPLITTING
-        # if not node.meets_minimum_requirements(df, label_col, self.min_variants_per_leaf,
-        #                                        self.min_pathogenic_per_leaf, self.min_benign_per_leaf):
-        #     return
 
         # Find best dimension to split on
         best_dim, best_jsd = self._find_best_split(node, df, score_col, label_col)
@@ -451,7 +399,6 @@ class CalibrationTree:
     def _calculate_cache_path(self, df: pd.DataFrame):
         base_path = "/cs/labs/dina/sapir_amittai/code/lab_winter_25/save_datasets_tmp/final_calibration_cache_cache"
         dims_as_str = "_".join([d.name for d in self.dims])
-        # dims_as_str += self.length_dim if self.length_dim is not None else "no_length"
         return os.path.join(
             base_path,
             f"cache_{len(df)}_min_var_{self.min_variants_per_leaf}_min_path_{self.min_pathogenic_per_leaf}_dims_{dims_as_str}.pkl"
@@ -463,10 +410,6 @@ class CalibrationTree:
         This is called once during build_tree and cached for fast lookup.
         Cache uses protein_sequence + mutant as unique key.
         """
-        # if self.cache_final_calibration_cache_path is not None:
-        #     with open(self.cache_final_calibration_cache_path, 'rb') as file:
-        #         self._final_calibration_cache = pickle.load(file)
-        #     return
         cache_final_calibration_cache_path = self._calculate_cache_path(df)
         if os.path.exists(cache_final_calibration_cache_path):
             with open(cache_final_calibration_cache_path, 'rb') as file:
@@ -474,11 +417,6 @@ class CalibrationTree:
             return
 
         print("\nComputing final calibration assignments...")
-
-        # Check if required columns exist
-        if 'protein_sequence' not in df.columns or 'mutant' not in df.columns:
-            print("Warning: 'protein_sequence' or 'mutant' column not found. Skipping cache.")
-            return
 
         assigned_keys = {}  # maps "protein_mutant" -> calibration_key
 
@@ -531,7 +469,6 @@ class CalibrationTree:
         with open(cache_final_calibration_cache_path, 'wb') as f:
             pickle.dump(self._final_calibration_cache, f)
         print(f"Saved calibration cache to {cache_final_calibration_cache_path}")
-
         print(f"Cached calibration assignments for {len(assigned_keys)} unique mutations")
 
     def _get_all_calibration_nodes(self, node: TreeNode) -> List[TreeNode]:
@@ -550,7 +487,7 @@ class CalibrationTree:
 
         return calibration_nodes
 
-    def _build_leaf_key(self, leaf: TreeNode) -> Tuple[str, ...]:
+    def _build_leaf_key(self, leaf: TreeNode) -> Key:
         """Build the key for a leaf by traversing up to root."""
 
         path = []
@@ -566,48 +503,7 @@ class CalibrationTree:
 
         return tuple(reversed(path))
 
-    def _ensure_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure required columns exist."""
-        df = df.copy()
 
-        if "sequence_length" not in df.columns and "protein_sequence" in df.columns:
-            df["sequence_length"] = df["protein_sequence"].str.len()
-
-        return df
-
-    def all_leaf_keys(self) -> List[Tuple[str, ...]]:
-        """Return all leaf keys."""
-        if not self.leaf_nodes:
-            return []
-        return [leaf.leaf_key for leaf in self.leaf_nodes]
-
-    # def add_helper_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-    #     """Add helper columns for all dimensions."""
-    #     df_with_helpers = df.copy()
-    #
-    #     for dim in self.dims:
-    #         helper_name = dim.get_helper_column_name()
-    #         if helper_name is not None and helper_name not in df_with_helpers.columns:
-    #             # Create helper column based on dimension
-    #             if dim.name == 'length':
-    #                 threshold = dim.get_threshold()
-    #                 if threshold:
-    #                     df_with_helpers[helper_name] = df_with_helpers['sequence_length'] > threshold
-    #             elif dim.name == 'fold':
-    #                 if 'is_disordered_mutation' in df_with_helpers.columns:
-    #                     df_with_helpers[helper_name] = df_with_helpers['is_disordered_mutation'].astype(bool)
-    #             elif dim.name == 'ppi':
-    #                 if 'is_ppi_mutation' in df_with_helpers.columns:
-    #                     df_with_helpers[helper_name] = df_with_helpers['is_ppi_mutation'].astype(bool)
-    #
-    #     return df_with_helpers
-
-    def get_col_names(self):
-        """Get column names for all dimensions."""
-        return [dim.col_name for dim in self.dims]
-
-
-# Keep existing dimension factory functions
 def dim_length(threshold: int):
     return Dimension(
         name="length",
@@ -676,7 +572,7 @@ def dim_homologs(threshold: int):
     )
 
 
-def build_node_calibration_masks(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Tuple[str, ...], pd.Series]:
+def build_node_calibration_masks(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Key, pd.Series]:
     """
     Build masks for calibration nodes where each mask includes all data in the subtree.
 
@@ -791,7 +687,7 @@ def build_node_calibration_masks(df: pd.DataFrame, spec: CalibrationTree) -> Dic
     return calibration_masks
 
 
-def build_leaf_masks(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Tuple[str, ...], pd.Series]:
+def build_leaf_masks(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Key, pd.Series]:
     """
         Build masks showing the FINAL calibration node for each mutation.
         ULTRA-FAST VERSION: Uses pre-computed cache with pandas merge (fully vectorized).
@@ -872,7 +768,8 @@ def build_leaf_masks(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Tuple[str,
     print(f"No cache available. Computing calibration for {len(df)} mutations...")
     return _compute_masks_from_scratch(df, spec)
 
-def _compute_masks_from_scratch(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Tuple[str, ...], pd.Series]:
+
+def _compute_masks_from_scratch(df: pd.DataFrame, spec: CalibrationTree) -> Dict[Key, pd.Series]:
     """Compute masks from scratch without using cache."""
     masks = {node.calibration_key: pd.Series(False, index=df.index)
              for node in spec.calibration_nodes if node.calibration_key is not None}
@@ -886,7 +783,7 @@ def _compute_masks_from_scratch(df: pd.DataFrame, spec: CalibrationTree) -> Dict
     return masks
 
 
-def _compute_assignments_for_df(df: pd.DataFrame, spec: CalibrationTree) -> Dict[int, Tuple[str, ...]]:
+def _compute_assignments_for_df(df: pd.DataFrame, spec: CalibrationTree) -> Dict[int, Key]:
     """Helper function to compute calibration assignments for a DataFrame."""
     assigned_keys = {}
 
@@ -922,160 +819,13 @@ def _compute_assignments_for_df(df: pd.DataFrame, spec: CalibrationTree) -> Dict
     return assigned_keys
 
 
-def get_calibration_for_mutation(
-        mutation_row: pd.Series,
-        spec: CalibrationTree
-) -> Optional[Tuple[Tuple[str, ...], bool, bool]]:
-    """
-    Navigate the tree to find the appropriate calibration node for a mutation.
-    Handles missing values by returning the parent node's calibration.
-
-    OPTIMIZED VERSION: Works directly with values instead of creating temp DataFrames.
-    """
-    if spec.root is None:
-        return None
-
-    current_node = spec.root
-    calibration_node = None
-    used_fallback = False
-    had_missing_value = False
-
-    # Keep track of last valid calibration node
-    if current_node.has_calibration:
-        calibration_node = current_node
-
-    # Navigate down the tree
-    while not current_node.is_leaf and current_node.split_dimension is not None:
-        dim = current_node.split_dimension
-
-        # Get the raw value from the row
-        try:
-            col_value = mutation_row.get(dim.col_name)
-        except Exception:
-            had_missing_value = True
-            used_fallback = True
-            break
-
-        # Check if value is missing
-        if pd.isna(col_value):
-            had_missing_value = True
-            used_fallback = True
-            break
-
-        # Determine dimension value using direct logic (NO DataFrame creation)
-        dim_value = None
-
-        try:
-            if dim.name == 'length':
-                # length dimension: compare sequence_length to threshold
-                threshold = dim.get_threshold()
-                if threshold is not None:
-                    if col_value <= threshold:
-                        dim_value = 'short'
-                    else:
-                        dim_value = 'long'
-
-            elif dim.name == 'fold':
-                # fold dimension: is_disordered_mutation True/False
-                if col_value == True:
-                    dim_value = 'disordered'
-                elif col_value == False:
-                    dim_value = 'ordered'
-
-            elif dim.name == 'ppi':
-                # ppi dimension: is_ppi_mutation True/False
-                if col_value == True:
-                    dim_value = 'ppi'
-                elif col_value == False:
-                    dim_value = 'non_ppi'
-
-            elif dim.name == 'sulfur':
-                # sulfur dimension: mutant starts with C or M
-                mutant = mutation_row.get('mutant', '')
-                if isinstance(mutant, str) and len(mutant) > 0:
-                    if mutant[0] in ['C', 'M']:
-                        dim_value = 'sulfur'
-                    else:
-                        dim_value = 'non_sulfur'
-
-            elif dim.name == 'homologs':
-                # homologs dimension: number_of_same_sequence_in_cluster
-                threshold = dim.get_threshold()
-                if threshold is not None:
-                    if col_value <= threshold:
-                        dim_value = 'low'
-                    else:
-                        dim_value = 'high'
-
-            # If we still don't have a value, it's missing
-            if dim_value is None:
-                had_missing_value = True
-                used_fallback = True
-                break
-
-        except Exception:
-            had_missing_value = True
-            used_fallback = True
-            break
-
-        # Move to child node
-        if dim_value in current_node.children:
-            child_node = current_node.children[dim_value]
-
-            # Check if child has calibration
-            if child_node.has_calibration:
-                current_node = child_node
-                calibration_node = child_node
-            else:
-                # Child exists but has no calibration - use parent's calibration
-                used_fallback = True
-                break
-        else:
-            # Child doesn't exist - use current calibration
-            used_fallback = True
-            break
-
-    if calibration_node is None:
-        return None
-
-    return (calibration_node.calibration_key, used_fallback, had_missing_value)
-
 def key_to_name(spec: CalibrationTree, key, sep="_") -> str:
     """Convert leaf key to readable name."""
     return sep.join(key)
 
 
-def assign_tree_path(df: pd.DataFrame, spec: CalibrationTree, col: str = "tree_path") -> pd.DataFrame:
-    """Assign tree path to each row in the DataFrame."""
-
-    df_out = df.copy()
-    df_out[col] = None
-
-    masks = build_leaf_masks(df, spec)
-
-    for key, mask in masks.items():
-        path_parts = [spec.path_prefix]
-
-        # Build path by traversing from root to this leaf
-        # Match the leaf key values with the actual dimensions used
-        current_node = spec.root
-        for value in key:
-            if current_node.split_dimension is not None:
-                path_parts.append(current_node.split_dimension.label_map[value])
-                # Move to the child corresponding to this value
-                current_node = current_node.children.get(value)
-                if current_node is None:
-                    break
-
-        tree_path = "/".join(path_parts)
-        df_out.loc[mask, col] = tree_path
-
-    return df_out
-
-
 def print_tree(node, prefix="", is_last=True, df=None):
     connector = "└── " if is_last else "├── "
-
 
     if node.is_leaf:
         if df is not None:
