@@ -52,8 +52,9 @@ NON_SULFUR = 'non_sulfur'
 PPI = 'ppi'
 NON_PPI = 'non_ppi'
 
-SCORE_COL = 'wt_not_nadav_marginals_base_wt_score'
+SCORE_COL = 'wt_score'
 WT_ENTROPY_COL_NAME = 'wt_record_entropy'
+PROTEIN_SEQUENCE_COL = 'protein_sequence'
 PPI_PREDICTIONS_PATH = "pioneer_predictions.zip"
 PPI_PREDICTIONS_FILE_NAME = "pioneer_predictions.json"
 

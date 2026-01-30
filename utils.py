@@ -4,13 +4,12 @@ from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-import re
 import metapredict as meta
 
 from sklearn.metrics import auc, roc_curve
 
 from consts import *
-from data_classes import AAMut, METHODS_TO_ESM
+from data_classes import AAMut
 from mutation_record import MutationRecord
 
 
@@ -334,17 +333,17 @@ def get_trunctad_logits(aa_only, batch_tokens, model):
 def run_esm(model, alphabet, protein_seq: str, aa_mut: AAMut):
     model.eval()
     with torch.no_grad():
-        seq_name = f"wt_marginals_{aa_mut.wt_aa}{aa_mut.mut_idx}{aa_mut.mut_idx}"
+        seq_name = f"{aa_mut.wt_aa}{aa_mut.mut_idx}{aa_mut.mut_idx}"
         truncated_logits = process_long_sequence_chunking_with_overlapping_regions(alphabet, seq_name, protein_seq,
                                                                                    model)
 
-        wt_record = MutationRecord(
+        mutation_record = MutationRecord(
             protein_seq=protein_seq,
             aa_mut=aa_mut,
             truncated_logits=truncated_logits,
         )
 
-    return wt_record.mutant_log_marginal_probability.item(), wt_record.marginal_entropy.item()
+    return mutation_record.mutant_log_marginal_probability.item(), mutation_record.marginal_entropy.item()
 
 
 def _create_simple_bins(scores, n_bins):
@@ -593,10 +592,11 @@ def calculate_auc_and_thresholds(test_data, label_col, score_col, calibrated_col
     print(raw_cm)
 
 
-def add_raw_esm1b_score(df: pd.DataFrame, score_col: str, entropy_score_col: str) -> pd.DataFrame:
+def add_raw_esm1b_score(df: pd.DataFrame, protein_sequence_modified: str, score_col: str, entropy_score_col: str) -> pd.DataFrame:
     """
     Adding raw ESM1b scores and entropy scores to the DataFrame.
     :param df: Input DataFrame with columns 'protein_sequence' and 'mutant'
+    :param protein_sequence_modified: Name of the column containing protein sequences
     :param score_col: Name of the column to store ESM1b scores
     :param entropy_score_col: Name of the column to store ESM1b entropy scores
     :return: DataFrame with added score columns
@@ -609,7 +609,7 @@ def add_raw_esm1b_score(df: pd.DataFrame, score_col: str, entropy_score_col: str
     esm1b_scores = []
     esm1b_entropies = []
     for idx, row in df.iterrows():
-        protein_seq = row['protein_sequence']
+        protein_seq = row[protein_sequence_modified]
         mutation = row['mutant']
         aa_mut = process_mutation_name(mutation, offset=OFFSET)
         esm1b_score, esm1b_entropy = run_esm(model, alphabet, protein_seq, aa_mut)
