@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.distance import jensenshannon
 
-from consts import MIN_VARIANTS_PER_LEAF, MIN_PATHOGENIC_PER_LEAF, MIN_BENIGN_PER_LEAF, BENIGN, PATHOGENIC
+from consts import MIN_VARIANTS_PER_LEAF, MIN_PATHOGENIC_PER_LEAF, MIN_BENIGN_PER_LEAF, BENIGN, PATHOGENIC, CACHE_FOLDER
 from data_classes import Dimension
 
 
@@ -397,10 +397,9 @@ class CalibrationTree:
         print(f"Total leaf nodes: {len(self.leaf_nodes)}")
 
     def _calculate_cache_path(self, df: pd.DataFrame):
-        base_path = "/cs/labs/dina/sapir_amittai/code/lab_winter_25/save_datasets_tmp/final_calibration_cache_cache"
         dims_as_str = "_".join([d.name for d in self.dims])
         return os.path.join(
-            base_path,
+            CACHE_FOLDER,
             f"cache_{len(df)}_min_var_{self.min_variants_per_leaf}_min_path_{self.min_pathogenic_per_leaf}_dims_{dims_as_str}.pkl"
         )
 
@@ -466,6 +465,7 @@ class CalibrationTree:
         # Store cache
         self._final_calibration_cache = assigned_keys
 
+        os.makedirs(CACHE_FOLDER, exist_ok=True)
         with open(cache_final_calibration_cache_path, 'wb') as f:
             pickle.dump(self._final_calibration_cache, f)
         print(f"Saved calibration cache to {cache_final_calibration_cache_path}")

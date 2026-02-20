@@ -57,6 +57,7 @@ WT_ENTROPY_COL_NAME = 'wt_record_entropy'
 PROTEIN_SEQUENCE_COL = 'protein_sequence'
 PPI_PREDICTIONS_PATH = "pioneer_predictions.zip"
 PPI_PREDICTIONS_FILE_NAME = "pioneer_predictions.json"
+CACHE_FOLDER = 'cache'
 
 
 MIN_VARIANTS_PER_LEAF = 1600
