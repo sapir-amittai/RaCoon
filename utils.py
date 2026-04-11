@@ -585,6 +585,12 @@ def calculate_auc_and_thresholds(test_data, label_col, score_col, calibrated_col
     print(f"Calibrated AUC for {calibrated_col_name}: {calibrated_auc:.3f}")
 
     raw_score = test_data[score_col].values
+    fpr_raw, tpr_raw, _ = roc_curve(labels, raw_score)
+    raw_auc = auc(fpr_raw, tpr_raw)
+    raw_auc = raw_auc if raw_auc >= 0.5 else 1 - raw_auc
+    print(f"Raw AUC for {score_col}: {raw_auc:.3f}")
+
+    raw_score = test_data[score_col].values
     metric_type = 'j_score'
     threshold_cm = calculate_best_threshold_metrics(labels, calibrated_scores, confusion_matrix_metric_type=metric_type, max_thresholds=100)
     raw_cm = calculate_best_threshold_metrics(labels, raw_score, confusion_matrix_metric_type=metric_type, max_thresholds=100)
