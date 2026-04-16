@@ -54,7 +54,8 @@ Optional output:
 1. save_df_path: if provided, the DataFrame augmented with RaCoon outputs will be written to this path.
 
 
-### Running with `clinvar_balanced.parquet`
+### 
+**Running with `clinvar_balanced.parquet`**
 
 For convenience, `clinvar_balanced.parquet` includes the relevant precomputed columns required by the pipeline, including the ESM1b-based score, entropy, and the residue-level annotation `is_disordered_mutation`.
 
