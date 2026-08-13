@@ -281,6 +281,97 @@ def compute_auc_for_differential_calibration(data: pd.DataFrame, label_col: str,
             pd.DataFrame(data=agg_results).to_csv(
                 f'delta_aucs_{supervision}_{name}_boot_{n_bootstraps}_samples_{n_samples}.csv')
 
+
+def _deranged_permutation(values, rng):
+    values = np.asarray(values)
+    if len(values) <= 1:
+        return values.copy()
+    indices = np.arange(len(values))
+    for _ in range(200):
+        permuted_indices = rng.permutation(indices)
+        if np.all(permuted_indices != indices):
+            return values[permuted_indices]
+    return np.roll(values, 1)
+
+
+def _sample_counts_for_pathogenic_fraction(n_pathogenic, n_benign, target_fraction):
+    best = None
+    for sampled_total in range(2, int(n_pathogenic + n_benign) + 1):
+        min_pathogenic = max(1, sampled_total - int(n_benign))
+        max_pathogenic = min(int(n_pathogenic), sampled_total - 1)
+        if min_pathogenic > max_pathogenic:
+            continue
+        sampled_pathogenic = int(np.round(float(target_fraction) * sampled_total))
+        sampled_pathogenic = min(max(sampled_pathogenic, min_pathogenic), max_pathogenic)
+        sampled_benign = sampled_total - sampled_pathogenic
+        achieved_fraction = sampled_pathogenic / sampled_total
+        fraction_error = abs(achieved_fraction - float(target_fraction))
+        candidate = {
+            'sampled_pathogenic': sampled_pathogenic,
+            'sampled_benign': sampled_benign,
+            'sampled_total': sampled_total,
+            'achieved_fraction': achieved_fraction,
+            'fraction_error': fraction_error,
+        }
+        if best is None or fraction_error < best['fraction_error']:
+            best = candidate
+        elif np.isclose(fraction_error, best['fraction_error']) and sampled_total > best['sampled_total']:
+            best = candidate
+    return best
+
+
+def protein_label_fraction_permutation_iteration(data: pd.DataFrame, label_col: str, protein_col: str,
+                                                 label_ratio_col: str, seed: int, size_bins: tuple=(20, 60)):
+    """Return one protein-level pathogenic-fraction permuted test set."""
+    required = [label_col, protein_col, label_ratio_col]
+    work = data.dropna(subset=required).copy()
+    work['_permutation_row_id'] = np.arange(len(work))
+
+    protein_summary = (
+        work.groupby(protein_col, sort=False)
+        .agg(
+            n_variants=(label_col, 'size'),
+            n_pathogenic=(label_col, 'sum'),
+            label_ratio=(label_ratio_col, 'first'),
+            n_unique_label_ratios=(label_ratio_col, 'nunique'),
+        )
+        .reset_index()
+    )
+
+    protein_summary['n_benign'] = protein_summary['n_variants'] - protein_summary['n_pathogenic']
+    protein_summary = protein_summary[
+        (protein_summary['n_pathogenic'] > 0) & (protein_summary['n_benign'] > 0)
+    ].copy()
+    bin_edges = [0, *size_bins, np.inf]
+    protein_summary['size_bin'] = pd.cut(
+        protein_summary['n_variants'], bins=bin_edges, labels=False, include_lowest=True
+    )
+
+    rng = np.random.default_rng(seed)
+    protein_summary['permuted_label_ratio'] = np.nan
+    for _, indices in protein_summary.groupby('size_bin', observed=False).groups.items():
+        indices = np.asarray(list(indices))
+        protein_summary.loc[indices, 'permuted_label_ratio'] = _deranged_permutation(
+            protein_summary.loc[indices, 'label_ratio'].to_numpy(), rng
+        )
+
+    selected_indices = []
+    protein_groups = dict(tuple(work.groupby(protein_col, sort=False)))
+    for _, row in protein_summary.iterrows():
+        protein_data = protein_groups[row[protein_col]]
+        pathogenic_indices = protein_data[protein_data[label_col] == 1]['_permutation_row_id'].to_numpy()
+        benign_indices = protein_data[protein_data[label_col] == 0]['_permutation_row_id'].to_numpy()
+        counts = _sample_counts_for_pathogenic_fraction(
+            row['n_pathogenic'], row['n_benign'], row['permuted_label_ratio']
+        )
+        sampled_pathogenic = rng.choice(pathogenic_indices, size=counts['sampled_pathogenic'], replace=False)
+        sampled_benign = rng.choice(benign_indices, size=counts['sampled_benign'], replace=False)
+        selected_indices.extend(sampled_pathogenic.tolist())
+        selected_indices.extend(sampled_benign.tolist())
+
+    sampled = work.iloc[selected_indices].drop(columns=['_permutation_row_id']).copy()
+    return sampled
+
 # JSD Calculation
 def jsd_between_subgroups(data: pd.DataFrame, label_col: str, score_col: str, score_range: list=[0,1],
                           subgroups: list=ALL_RESIDUE_SUBGROUPS):
