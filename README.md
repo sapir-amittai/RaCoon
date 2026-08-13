@@ -1,4 +1,5 @@
 **RaCoon (Residue-aware Calibration via Conditional distributions)**
+<img width="2217" height="1980" alt="pipeline_R1" src="https://github.com/user-attachments/assets/68334d94-08f9-48ef-9a3a-574d93ad74e7" />
 
 ###
 **Overview**
